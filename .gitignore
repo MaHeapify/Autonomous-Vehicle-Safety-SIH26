@@ -121,3 +121,9 @@ tmp/
 temp/
 *.swp
 *.swo
+
+# =========================
+# Map files
+# =========================
+yelahanka-metadrive/maps/sumo/*.xml
+yelahanka-metadrive/maps/opendrive/*.xodr
