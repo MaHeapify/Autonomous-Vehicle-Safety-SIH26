@@ -1,0 +1,11 @@
+{
+  "extraPaths": [
+    "..",
+    "../metadrive",
+    ".",
+    "D:/downloads/SIH-MTECK -2026/metadrive_source",
+    "C:/Users/harip/AppData/Local/Programs/Python/Python311/Lib/site-packages"
+  ],
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false
+}
