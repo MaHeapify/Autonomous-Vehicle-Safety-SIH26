@@ -1,0 +1,123 @@
+# =========================
+# Python
+# =========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+.env.*
+
+# Python packaging
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+pip-wheel-metadata/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache/
+
+# Type checkers / linters
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# =========================
+# Jupyter
+# =========================
+
+.ipynb_checkpoints/
+
+# =========================
+# MetaDrive
+# =========================
+
+# Generated datasets / recordings
+data/
+datasets/
+records/
+recordings/
+videos/
+
+# Model checkpoints / trained models
+checkpoints/
+models/
+*.pth
+*.pt
+*.ckpt
+
+# Generated simulation outputs
+outputs/
+results/
+logs/
+
+# =========================
+# SUMO
+# =========================
+
+# SUMO generated files
+*.sumocfg~
+*.net.xml~
+*.rou.xml~
+*.rou.xml.gz
+
+# SUMO logs / outputs
+*.log
+*.tripinfo.xml
+*.fcd.xml
+*.emission.xml
+*.summary.xml
+*.statistic.xml
+*.vehroute.xml
+*.collision.xml
+*.queue.xml
+
+# SUMO temporary / generated files
+*.tmp
+*.bak
+
+# =========================
+# IDEs
+# =========================
+
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# OS files
+# =========================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Environment / secrets
+# =========================
+
+.env
+*.env
+
+# =========================
+# Project-specific temporary files
+# =========================
+
+tmp/
+temp/
+*.swp
+*.swo
