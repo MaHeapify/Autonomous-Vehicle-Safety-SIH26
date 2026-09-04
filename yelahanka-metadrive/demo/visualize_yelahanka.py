@@ -558,7 +558,7 @@ def _draw_centrelines_fallback(engine, root):
 
             try:
                 lane = OpenDriveLane(3.5, lane_data)
-                pts  = lane.visualization_points
+                pts  = _get_lane_points(lane)
                 if pts is None or len(pts) < 2:
                     continue
 
@@ -591,9 +591,14 @@ def _draw_centrelines_fallback(engine, root):
 
 def _get_lane_points(lane):
     """Return the (N, 2) centreline point array for a lane, or None."""
-    for attr in ("visualization_points", "points"):
+    for attr in ("visualization_points", "points", "get_polyline"):
         pts = getattr(lane, attr, None)
         if pts is not None:
+            if callable(pts):
+                try:
+                    pts = pts()
+                except Exception:
+                    continue
             pts = np.asarray(pts, dtype=np.float64)
             if pts.ndim == 2 and pts.shape[1] >= 2 and len(pts) >= 2:
                 pts = pts[:, :2]
