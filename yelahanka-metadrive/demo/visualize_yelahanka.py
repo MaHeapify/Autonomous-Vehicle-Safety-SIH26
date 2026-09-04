@@ -338,11 +338,10 @@ def create_center_marker(engine, cx, cy):
 # ROAD SURFACE (filled quads from lane centreline)
 # ================================================================
 
-def draw_road_surfaces(engine, blocks):
+def draw_road_surfaces(engine, global_network):
     """
     Draw filled asphalt-coloured quads along every lane centreline.
-    Uses the same triangle-strip geometry as OpenDriveBlock but
-    rendered into the scene graph directly for immediate feedback.
+    Uses the global road network which holds all lanes after block construction.
     """
     from panda3d.core import (
         Geom, GeomNode, GeomTriangles,
@@ -356,54 +355,51 @@ def draw_road_surfaces(engine, blocks):
     root = engine.render.attachNewNode("YelahankaRoads")
     total_quads = 0
 
-    for block in blocks:
-        graph = getattr(block.block_network, "graph", {})
+    for lane_key, lane_info in global_network.graph.items():
+        try:
+            lane = lane_info.lane
+            pts = _get_lane_points(lane)
+            if pts is None or len(pts) < 2:
+                continue
 
-        for lane_key, lane_info in graph.items():
-            try:
-                lane   = lane_info.lane
-                pts    = _get_lane_points(lane)
-                if pts is None or len(pts) < 2:
-                    continue
+            width = max(float(getattr(lane, "width", 3.5) or 3.5), 0.5)
+            hw = width * 0.5
 
-                width  = max(float(getattr(lane, "width", 3.5) or 3.5), 0.5)
-                hw     = width * 0.5
+            left_pts, right_pts = _lane_boundaries(pts, hw)
+            if len(left_pts) < 2:
+                continue
 
-                left_pts, right_pts = _lane_boundaries(pts, hw)
-                if len(left_pts) < 2:
-                    continue
+            vdata = GeomVertexData(
+                "road", GeomVertexFormat.getV3(), Geom.UH_static
+            )
+            n_verts = len(left_pts) * 2
+            vdata.setNumRows(n_verts)
+            vw = GeomVertexWriter(vdata, "vertex")
 
-                vdata = GeomVertexData(
-                    "road", GeomVertexFormat.getV3(), Geom.UH_static
-                )
-                n_verts = len(left_pts) * 2
-                vdata.setNumRows(n_verts)
-                vw = GeomVertexWriter(vdata, "vertex")
+            for lp, rp in zip(left_pts, right_pts):
+                vw.addData3f(float(lp[0]), float(lp[1]), 0.0)
+                vw.addData3f(float(rp[0]), float(rp[1]), 0.0)
 
-                for lp, rp in zip(left_pts, right_pts):
-                    vw.addData3f(float(lp[0]), float(lp[1]), 0.0)
-                    vw.addData3f(float(rp[0]), float(rp[1]), 0.0)
+            tris = GeomTriangles(Geom.UH_static)
+            for i in range(len(left_pts) - 1):
+                la, ra = 2 * i, 2 * i + 1
+                lb, rb = 2 * (i + 1), 2 * (i + 1) + 1
+                tris.addVertices(la, ra, lb)
+                tris.addVertices(ra, rb, lb)
 
-                tris = GeomTriangles(Geom.UH_static)
-                for i in range(len(left_pts) - 1):
-                    la, ra = 2 * i, 2 * i + 1
-                    lb, rb = 2 * (i + 1), 2 * (i + 1) + 1
-                    tris.addVertices(la, ra, lb)
-                    tris.addVertices(ra, rb, lb)
+            geom = Geom(vdata)
+            geom.addPrimitive(tris)
+            node = GeomNode("road-%s" % str(lane_key))
+            node.addGeom(geom)
 
-                geom = Geom(vdata)
-                geom.addPrimitive(tris)
-                node = GeomNode("road-%s" % str(lane_key))
-                node.addGeom(geom)
+            np_ = root.attachNewNode(node)
+            np_.setTwoSided(True)
+            np_.setColor(ROAD_COLOR)
 
-                np_ = root.attachNewNode(node)
-                np_.setTwoSided(True)
-                np_.setColor(ROAD_COLOR)
+            total_quads += len(left_pts) - 1
 
-                total_quads += len(left_pts) - 1
-
-            except Exception as e:
-                pass   # silently skip broken lanes
+        except Exception:
+            pass  # silently skip broken lanes
 
     print(f"[ROAD] Road-surface quads: {total_quads}")
     return root
@@ -413,9 +409,10 @@ def draw_road_surfaces(engine, blocks):
 # LANE MARKINGS  (yellow lines between lanes)
 # ================================================================
 
-def draw_lane_markings(engine, blocks):
+def draw_lane_markings(engine, global_network):
     """
     Draw yellow dashed / solid lane-boundary lines.
+    Uses the global road network which holds all lanes after block construction.
     """
     print()
     print("[MARK] Building lane markings...")
@@ -423,41 +420,38 @@ def draw_lane_markings(engine, blocks):
     root = engine.render.attachNewNode("YelahankaMarkings")
     drawn = 0
 
-    for block in blocks:
-        graph = getattr(block.block_network, "graph", {})
+    for lane_key, lane_info in global_network.graph.items():
+        try:
+            lane = lane_info.lane
+            pts = _get_lane_points(lane)
+            if pts is None or len(pts) < 2:
+                continue
 
-        for lane_key, lane_info in graph.items():
-            try:
-                lane = lane_info.lane
-                pts  = _get_lane_points(lane)
-                if pts is None or len(pts) < 2:
+            width = max(float(getattr(lane, "width", 3.5) or 3.5), 0.5)
+            hw = width * 0.5
+
+            left_pts, right_pts = _lane_boundaries(pts, hw)
+
+            for side_pts in (left_pts, right_pts):
+                if len(side_pts) < 2:
                     continue
 
-                width = max(float(getattr(lane, "width", 3.5) or 3.5), 0.5)
-                hw    = width * 0.5
+                ls = LineSegs("mark-%s" % str(lane_key))
+                ls.setThickness(LINE_WIDTH_LANE_MARK)
+                ls.setColor(MARK_COLOR)
 
-                left_pts, right_pts = _lane_boundaries(pts, hw)
+                p0 = side_pts[0]
+                ls.moveTo(float(p0[0]), float(p0[1]), 1.5)
+                for p in side_pts[1:]:
+                    ls.drawTo(float(p[0]), float(p[1]), 1.5)
 
-                for side_pts in (left_pts, right_pts):
-                    if len(side_pts) < 2:
-                        continue
+                n = root.attachNewNode(ls.create())
+                n.setTwoSided(True)
+                n.setAntialias(AntialiasAttrib.MLine)
+                drawn += 1
 
-                    ls = LineSegs("mark-%s" % str(lane_key))
-                    ls.setThickness(LINE_WIDTH_LANE_MARK)
-                    ls.setColor(MARK_COLOR)
-
-                    p0 = side_pts[0]
-                    ls.moveTo(float(p0[0]), float(p0[1]), 1.5)
-                    for p in side_pts[1:]:
-                        ls.drawTo(float(p[0]), float(p[1]), 1.5)
-
-                    n = root.attachNewNode(ls.create())
-                    n.setTwoSided(True)
-                    n.setAntialias(AntialiasAttrib.MLine)
-                    drawn += 1
-
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     print(f"[MARK] Lane-marking polylines: {drawn}")
     return root
@@ -467,9 +461,10 @@ def draw_lane_markings(engine, blocks):
 # LANE CENTRELINES  (diagnostic red)
 # ================================================================
 
-def draw_centrelines(engine, blocks):
+def draw_centrelines(engine, global_network):
     """
     Draw thin red centrelines through every lane for diagnostics.
+    Uses the global road network which holds all lanes after block construction.
     """
     print()
     print("[CENTRE] Building centreline debug lines...")
@@ -477,31 +472,28 @@ def draw_centrelines(engine, blocks):
     root    = engine.render.attachNewNode("YelahankaCentrelines")
     rendered = 0
 
-    for block in blocks:
-        graph = getattr(block.block_network, "graph", {})
+    for lane_key, lane_info in global_network.graph.items():
+        try:
+            lane = lane_info.lane
+            pts = _get_lane_points(lane)
+            if pts is None or len(pts) < 2:
+                continue
 
-        for lane_key, lane_info in graph.items():
-            try:
-                lane = lane_info.lane
-                pts  = _get_lane_points(lane)
-                if pts is None or len(pts) < 2:
-                    continue
+            ls = LineSegs("cl-%s" % str(lane_key))
+            ls.setThickness(LINE_WIDTH_CENTRELINE)
+            ls.setColor(CENTRE_COLOR)
 
-                ls = LineSegs("cl-%s" % str(lane_key))
-                ls.setThickness(LINE_WIDTH_CENTRELINE)
-                ls.setColor(CENTRE_COLOR)
+            ls.moveTo(float(pts[0][0]), float(pts[0][1]), 3.0)
+            for p in pts[1:]:
+                ls.drawTo(float(p[0]), float(p[1]), 3.0)
 
-                ls.moveTo(float(pts[0][0]), float(pts[0][1]), 3.0)
-                for p in pts[1:]:
-                    ls.drawTo(float(p[0]), float(p[1]), 3.0)
+            n = root.attachNewNode(ls.create())
+            n.setTwoSided(True)
+            n.setAntialias(AntialiasAttrib.MLine)
+            rendered += 1
 
-                n = root.attachNewNode(ls.create())
-                n.setTwoSided(True)
-                n.setAntialias(AntialiasAttrib.MLine)
-                rendered += 1
-
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     print(f"[CENTRE] Centrelines rendered: {rendered}")
 
@@ -791,21 +783,21 @@ if __name__ == "__main__":
     # ============================================================
 
     if DRAW_ROAD_SURFACE:
-        draw_road_surfaces(engine, blocks)
+        draw_road_surfaces(engine, global_network)
 
     # ============================================================
     # LANE MARKINGS
     # ============================================================
 
     if DRAW_LANE_LINES:
-        draw_lane_markings(engine, blocks)
+        draw_lane_markings(engine, global_network)
 
     # ============================================================
     # CENTRELINES  (diagnostic)
     # ============================================================
 
     if DRAW_CENTRELINES:
-        draw_centrelines(engine, blocks)
+        draw_centrelines(engine, global_network)
 
     # ============================================================
     # CENTER MARKER
