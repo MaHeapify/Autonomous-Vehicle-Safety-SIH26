@@ -3,6 +3,9 @@ visualize_yelahanka.py
 ======================
 Yelahanka OpenDRIVE map visualizer for MetaDrive.
 
+NOTE: Run from the yelahanka-metadrive/ directory:
+    python demo/visualize_yelahanka.py
+
 Improvements over initial commit
 ---------------------------------
 * Fixed lane rendering   – `draw_debug_lanes()` now correctly walks every
@@ -42,7 +45,12 @@ os.environ.setdefault("vblank_mode", "0")
 
 import math
 import sys
+import io
 import numpy as np
+
+# Force UTF-8 on Windows console so Unicode prints don't crash.
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from panda3d.core import (
     AmbientLight,
@@ -739,8 +747,8 @@ if __name__ == "__main__":
     print("=" * 40)
     print("[MAP] BOUNDS")
     print("=" * 40)
-    print(f"  X: {x_min:.1f} → {x_max:.1f}  (width  {mw:.1f} m)")
-    print(f"  Y: {y_min:.1f} → {y_max:.1f}  (height {mh:.1f} m)")
+    print(f"  X: {x_min:.1f} to {x_max:.1f}  (width  {mw:.1f} m)")
+    print(f"  Y: {y_min:.1f} to {y_max:.1f}  (height {mh:.1f} m)")
     print(f"  Center: ({cx:.1f}, {cy:.1f})")
 
     # ============================================================
