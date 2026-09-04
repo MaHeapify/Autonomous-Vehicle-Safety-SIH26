@@ -62,7 +62,7 @@ for _p in [_WORKSPACE_ROOT, os.path.join(_WORKSPACE_ROOT, "metadrive"), r"D:\dow
         sys.path.insert(0, _p)
 
 
-from panda3d.core import (
+from panda3d.core import (  # type: ignore
     AmbientLight,
     AntialiasAttrib,
     Camera,
@@ -109,19 +109,19 @@ loadPrcFileData("", "notify-level-display info")
 # METADRIVE IMPORTS
 # ============================================================
 
-from metadrive.component.opendrive_block.opendrive_block import (
+from metadrive.component.opendrive_block.opendrive_block import (  # type: ignore
     OpenDriveBlock,
 )
-from metadrive.component.road_network.edge_road_network import (
+from metadrive.component.road_network.edge_road_network import (  # type: ignore
     OpenDriveRoadNetwork,
 )
-from metadrive.engine.asset_loader import (
+from metadrive.engine.asset_loader import (  # type: ignore
     initialize_asset_loader,
 )
-from metadrive.tests.vis_block.vis_block_base import (
+from metadrive.tests.vis_block.vis_block_base import (  # type: ignore
     TestBlock,
 )
-from metadrive.utils.opendrive.map_load import (
+from metadrive.utils.opendrive.map_load import (  # type: ignore
     load_opendrive_map,
 )
 
@@ -529,8 +529,8 @@ def _draw_centrelines_fallback(engine, root):
 
     rendered = 0
 
-    from metadrive.component.lane.opendrive_lane import OpenDriveLane
-    from metadrive.utils.opendrive.map_load import get_lane_width
+    from metadrive.component.lane.opendrive_lane import OpenDriveLane  # type: ignore
+    from metadrive.utils.opendrive.map_load import get_lane_width  # type: ignore
 
     for road in odr_map.roads[:MAX_ROADS]:
         try:
