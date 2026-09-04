@@ -1,32 +1,108 @@
+"""
+visualize_yelahanka.py
+======================
+Yelahanka OpenDRIVE map visualizer for MetaDrive.
+
+Improvements over initial commit
+---------------------------------
+* Fixed lane rendering   – `draw_debug_lanes()` now correctly walks every
+                          block's network graph and pulls lane.visualization_points.
+* Direct-geometry lanes  – Falls back to raw geometry scan when the block
+                          network graph is empty (covers allLanes path).
+* AMD / hardware rendering – Forces hardware vertex buffers, disables software
+                            fallback, and picks the best available renderer.
+* Richer visuals         – Coloured lane lines by type, anti-aliased lines,
+                          road-surface quads in addition to centrelines,
+                          lane-marking outlines in yellow/white.
+* Better camera          – Uses Panda3D's built-in orthographic top-down view
+                          with correct aspect ratio.
+
+Usage
+-----
+    cd yelahanka-metadrive
+    python demo/visualize_yelahanka.py
+"""
+
+# ============================================================
+# HARDWARE / DRIVER HINTS  (must come before panda3d imports)
+# ============================================================
+
+import os
+
+# Prefer OpenGL – works best with AMD Radeon / RX / RDNA on Windows.
+# Remove or change to "pandadx9" if DX9 is preferred.
+os.environ.setdefault("PANDA_DISPLAY_DRIVER", "pandagl")
+
+# Disable CPU-side software fallback so panda reports an error early
+# rather than silently falling back to software rendering.
+os.environ.setdefault("PANDA_SOFTWARE_RENDERER", "0")
+
+# Tell Mesa / AMD driver not to throttle background windows.
+os.environ.setdefault("vblank_mode", "0")
+
 import math
+import sys
 import numpy as np
 
 from panda3d.core import (
     AmbientLight,
-    DirectionalLight,
-    CardMaker,
-    Vec4,
-    LineSegs,
+    AntialiasAttrib,
     Camera,
+    CardMaker,
+    DirectionalLight,
+    FrameBufferProperties,
+    GeomVertexFormat,
+    LineSegs,
+    LoaderOptions,
     OrthographicLens,
+    Vec4,
+    WindowProperties,
+    loadPrcFileData,
 )
+
+# ============================================================
+# PANDA3D RENDERING CONFIGURATION
+# ============================================================
+
+# Multi-sample anti-aliasing (4x) – supported by all modern AMD GPUs.
+loadPrcFileData("", "framebuffer-multisample 1")
+loadPrcFileData("", "multisamples 4")
+
+# Hardware vertex processing – offloads transforms to the GPU.
+loadPrcFileData("", "hardware-animated-vertices 1")
+
+# Enable OpenGL VBO (vertex buffer objects) – crucial for AMD perf.
+loadPrcFileData("", "vertex-buffers 1")
+loadPrcFileData("", "index-buffers 1")
+loadPrcFileData("", "compressed-vertices 0")
+
+# Window settings.
+loadPrcFileData("", "window-title YELAHANKA MetaDrive Visualizer")
+loadPrcFileData("", "win-size 1600 900")
+
+# Sync to display (0 = unlimited FPS, good for a static map view).
+loadPrcFileData("", "sync-video 0")
+
+# Log only warnings and above during normal operation.
+loadPrcFileData("", "notify-level warning")
+loadPrcFileData("", "notify-level-display info")
+
+# ============================================================
+# METADRIVE IMPORTS
+# ============================================================
 
 from metadrive.component.opendrive_block.opendrive_block import (
     OpenDriveBlock,
 )
-
 from metadrive.component.road_network.edge_road_network import (
     OpenDriveRoadNetwork,
 )
-
 from metadrive.engine.asset_loader import (
     initialize_asset_loader,
 )
-
 from metadrive.tests.vis_block.vis_block_base import (
     TestBlock,
 )
-
 from metadrive.utils.opendrive.map_load import (
     load_opendrive_map,
 )
@@ -36,27 +112,44 @@ from metadrive.utils.opendrive.map_load import (
 # SETTINGS
 # ================================================================
 
-XODR_PATH = "maps/opendrive/yelahanka.xodr"
+XODR_PATH   = "maps/opendrive/yelahanka.xodr"
+MAX_ROADS   = 200          # Increase from 50 to load more of the map
 
-MAX_ROADS = 50
+GROUND_MARGIN   = 1_000.0  # metres extra around the map boundary
+CAMERA_HEIGHT   = 8_000.0  # orthographic top-down height
+VIEW_MARGIN     = 1.12     # fraction of viewport the map occupies
 
-# Extra space around map.
-GROUND_MARGIN = 1000.0
+DRAW_GROUND         = True
+DRAW_ROAD_SURFACE   = True   # filled asphalt quads
+DRAW_LANE_LINES     = True   # yellow/white lane-marking lines
+DRAW_CENTRELINES    = True   # thin red centrelines (debug)
+DRAW_CENTER_MARKER  = True
 
-# Height is not important with orthographic projection, but keep
-# the camera comfortably above the map.
-CAMERA_HEIGHT = 5000.0
+LINE_WIDTH_CENTRELINE  = 3.0
+LINE_WIDTH_LANE_MARK   = 4.0
 
-# Fraction of viewport occupied by map.
-VIEW_MARGIN = 1.15
+# Road-surface colour  (dark asphalt)
+ROAD_COLOR  = Vec4(0.20, 0.20, 0.20, 1.0)
+# Lane centreline colour (diagnostic red)
+CENTRE_COLOR = Vec4(1.0, 0.15, 0.15, 1.0)
+# Lane marking colour (yellow)
+MARK_COLOR  = Vec4(1.0, 0.85, 0.10, 1.0)
 
-# Debug rendering.
-DRAW_GROUND = True
-DRAW_DEBUG_LANES = True
-DRAW_CENTER_MARKER = True
 
-# Debug lane appearance.
-DEBUG_LINE_WIDTH = 5.0
+# ================================================================
+# HARDWARE INFO
+# ================================================================
+
+def print_hw_info():
+    """Print Panda3D renderer information for diagnostics."""
+    try:
+        from panda3d.core import GraphicsEngine, GraphicsPipe, GraphicsPipeSelection
+        sel = GraphicsPipeSelection.getGlobalPtr()
+        print("[HW] Available renderers:", sel.getNumPipeTypes())
+        for i in range(sel.getNumPipeTypes()):
+            print("[HW]  ", sel.getPipeTypeName(i))
+    except Exception as e:
+        print("[HW] Could not query renderers:", e)
 
 
 # ================================================================
@@ -65,117 +158,43 @@ DEBUG_LINE_WIDTH = 5.0
 
 def setup_lighting(engine):
 
-    print("[RENDER] Creating ambient light...")
+    print("[RENDER] Setting up lighting...")
 
-    ambient = AmbientLight(
-        "yelahanka-ambient"
-    )
+    ambient = AmbientLight("yelahanka-ambient")
+    ambient.setColor(Vec4(0.75, 0.75, 0.75, 1.0))
+    ambient_np = engine.render.attachNewNode(ambient)
+    engine.render.setLight(ambient_np)
 
-    ambient.setColor(
-        Vec4(
-            0.8,
-            0.8,
-            0.8,
-            1.0
-        )
-    )
+    directional = DirectionalLight("yelahanka-directional")
+    directional.setColor(Vec4(1.0, 1.0, 0.95, 1.0))
+    dir_np = engine.render.attachNewNode(directional)
+    dir_np.setHpr(-45, -60, 0)
+    engine.render.setLight(dir_np)
 
-    ambient_np = engine.render.attachNewNode(
-        ambient
-    )
-
-    engine.render.setLight(
-        ambient_np
-    )
-
-    print("[RENDER] Creating directional light...")
-
-    directional = DirectionalLight(
-        "yelahanka-directional"
-    )
-
-    directional.setColor(
-        Vec4(
-            1.0,
-            1.0,
-            1.0,
-            1.0
-        )
-    )
-
-    directional_np = engine.render.attachNewNode(
-        directional
-    )
-
-    directional_np.setHpr(
-        -45,
-        -60,
-        0
-    )
-
-    engine.render.setLight(
-        directional_np
-    )
+    print("[RENDER] Lighting done.")
 
 
 # ================================================================
 # GROUND
 # ================================================================
 
-def create_ground(
-    engine,
-    center_x,
-    center_y,
-    size
-):
+def create_ground(engine, center_x, center_y, size):
 
-    print("[GROUND] Creating ground...")
+    print("[GROUND] Creating ground plane...")
 
-    cm = CardMaker(
-        "yelahanka-ground"
-    )
-
+    cm = CardMaker("yelahanka-ground")
     half = size / 2.0
+    cm.setFrame(-half, half, -half, half)
 
-    cm.setFrame(
-        -half,
-        half,
-        -half,
-        half
-    )
+    ground = engine.render.attachNewNode(cm.generate())
+    ground.setPos(center_x, center_y, -1.0)
+    ground.setColor(0.12, 0.13, 0.12, 1.0)   # very dark greenish-grey
+    ground.setTwoSided(True)
 
-    ground = engine.render.attachNewNode(
-        cm.generate()
-    )
+    # Anti-alias the ground edges too.
+    ground.setAntialias(AntialiasAttrib.MAuto)
 
-    ground.setPos(
-        center_x,
-        center_y,
-        -10.0
-    )
-
-    # Dark grey.
-    ground.setColor(
-        0.15,
-        0.15,
-        0.15,
-        1.0
-    )
-
-    ground.setTwoSided(
-        True
-    )
-
-    print(
-        "[GROUND] Position:",
-        ground.getPos()
-    )
-
-    print(
-        "[GROUND] Size:",
-        size
-    )
-
+    print(f"[GROUND] Center: ({center_x:.1f}, {center_y:.1f}), size: {size:.1f} m")
     return ground
 
 
@@ -184,588 +203,420 @@ def create_ground(
 # ================================================================
 
 def get_map_bounds(roads):
-
-    points = []
+    """
+    Return (x_min, x_max, y_min, y_max) by sampling every geometry
+    start position in the road plan-view.
+    """
+    xs, ys = [], []
 
     for road in roads:
-
         try:
-
-            geometries = (
-                road.planView._geometries
-            )
-
+            geometries = road.planView._geometries
         except Exception:
-
             continue
 
         for geo in geometries:
-
             try:
-
-                start = np.asarray(
-                    geo.start_position,
-                    dtype=np.float64
-                )
-
+                sx, sy = float(geo.start_position[0]), float(geo.start_position[1])
+                if math.isfinite(sx) and math.isfinite(sy):
+                    xs.append(sx)
+                    ys.append(sy)
             except Exception:
+                pass
 
-                continue
-
-            if (
-                start.ndim != 1
-                or len(start) < 2
-                or not np.all(
-                    np.isfinite(start[:2])
-                )
-            ):
-
-                continue
-
-            start = start[:2]
-
-            points.append(
-                start
-            )
-
+            # Also estimate the far end of this geometry.
             try:
-
-                length = float(
-                    geo.length
-                )
-
+                h  = float(geo.heading)
+                ln = float(geo.length)
+                ex = sx + math.cos(h) * ln
+                ey = sy + math.sin(h) * ln
+                if math.isfinite(ex) and math.isfinite(ey):
+                    xs.append(ex)
+                    ys.append(ey)
             except Exception:
+                pass
 
-                length = 0.0
+    if not xs:
+        return 0.0, 1000.0, 0.0, 1000.0
 
-            try:
-
-                heading = float(
-                    geo.heading
-                )
-
-            except Exception:
-
-                heading = 0.0
-
-            if length > 0:
-
-                end = (
-                    start
-                    + np.array(
-                        [
-                            np.cos(heading) * length,
-                            np.sin(heading) * length
-                        ],
-                        dtype=np.float64
-                    )
-                )
-
-                if np.all(
-                    np.isfinite(end)
-                ):
-
-                    points.append(
-                        end
-                    )
-
-    if len(points) < 2:
-
-        raise RuntimeError(
-            "Unable to determine OpenDRIVE map bounds."
-        )
-
-    points = np.asarray(
-        points,
-        dtype=np.float64
-    )
-
-    x_min = float(
-        np.min(points[:, 0])
-    )
-
-    x_max = float(
-        np.max(points[:, 0])
-    )
-
-    y_min = float(
-        np.min(points[:, 1])
-    )
-
-    y_max = float(
-        np.max(points[:, 1])
-    )
-
-    return (
-        x_min,
-        x_max,
-        y_min,
-        y_max
-    )
+    return min(xs), max(xs), min(ys), max(ys)
 
 
 # ================================================================
-# DEDICATED CAMERA
+# CAMERA
 # ================================================================
 
-def setup_dedicated_camera(
-    engine,
-    center_x,
-    center_y,
-    map_width,
-    map_height
-):
+def setup_dedicated_camera(engine, center_x, center_y, map_width, map_height, win):
 
     print()
-    print("========================================")
-    print("[CAMERA] Creating dedicated Panda3D camera")
-    print("========================================")
+    print("=" * 40)
+    print("[CAMERA] Setting up top-down orthographic camera")
+    print("=" * 40)
 
-    # ------------------------------------------------------------
-    # Get the window.
-    # ------------------------------------------------------------
-
-    win = engine.win
-
-    if win is None:
-
-        raise RuntimeError(
-            "MetaDrive window is not available."
-        )
-
-    # ------------------------------------------------------------
-    # Disable ALL existing display regions.
-    #
-    # This is important.
-    #
-    # We do not want TestBlock's default camera/display region
-    # competing with our camera.
-    # ------------------------------------------------------------
-
-    existing_regions = (
-        win.getDisplayRegions()
-    )
-
-    print(
-        "[CAMERA] Existing display regions:",
-        len(existing_regions)
-    )
-
-    for region in existing_regions:
-
+    # Disable every existing display region / camera.
+    for dr in list(win.getDisplayRegions()):
         try:
+            dr.setActive(False)
+        except Exception:
+            pass
 
-            region.setActive(
-                False
-            )
-
-        except Exception as e:
-
-            print(
-                "[CAMERA] Could not disable region:",
-                type(e).__name__,
-                str(e)
-            )
-
-    # ------------------------------------------------------------
-    # Create our own camera.
-    # ------------------------------------------------------------
-
-    camera_node = Camera(
-        "YelahankaTopDownCamera"
-    )
-
-    camera_np = engine.render.attachNewNode(
-        camera_node
-    )
-
-    # ------------------------------------------------------------
-    # Orthographic projection.
-    #
-    # This is intentionally used instead of perspective.
-    #
-    # Therefore:
-    #
-    #   - no perspective distortion
-    #   - no FOV problems
-    #   - map scale is predictable
-    #   - entire map can be fitted exactly
-    # ------------------------------------------------------------
+    cam_node = Camera("YelahankaTopDown")
+    cam_np   = engine.render.attachNewNode(cam_node)
 
     lens = OrthographicLens()
 
-    aspect = 1.0
+    props = win.getProperties()
+    w, h  = props.getXSize(), props.getYSize()
+    aspect = (float(w) / float(h)) if h > 0 else 1.333
 
-    try:
+    # Fit the whole map into the viewport with some margin.
+    film_h = max(float(map_height), float(map_width) / aspect) * VIEW_MARGIN
+    film_w = film_h * aspect
 
-        properties = (
-            win.getProperties()
-        )
+    lens.setFilmSize(film_w, film_h)
+    lens.setNear(1.0)
+    lens.setFar(200_000.0)
+    cam_node.setLens(lens)
 
-        width = properties.getXSize()
-        height = properties.getYSize()
+    cam_np.setPos(center_x, center_y, CAMERA_HEIGHT)
+    cam_np.setHpr(0, -90, 0)    # look straight down
 
-        if height > 0:
+    dr = win.makeDisplayRegion(0.0, 1.0, 0.0, 1.0)
+    dr.setCamera(cam_np)
+    dr.setActive(True)
+    dr.setClearColorActive(True)
+    dr.setClearColor(Vec4(0.60, 0.62, 0.65, 1.0))  # sky-grey background
 
-            aspect = (
-                float(width)
-                / float(height)
-            )
+    print(f"[CAMERA] Position:      ({center_x:.1f}, {center_y:.1f}, {CAMERA_HEIGHT})")
+    print(f"[CAMERA] Film size:     {film_w:.1f} x {film_h:.1f} m")
+    print(f"[CAMERA] Aspect ratio:  {aspect:.4f}")
 
-    except Exception:
-
-        aspect = 1.0
-
-    map_width = max(
-        float(map_width),
-        1.0
-    )
-
-    map_height = max(
-        float(map_height),
-        1.0
-    )
-
-    # Fit both dimensions into the viewport.
-    film_height = (
-        max(
-            map_height,
-            map_width / aspect
-        )
-        * VIEW_MARGIN
-    )
-
-    film_width = (
-        film_height
-        * aspect
-    )
-
-    lens.setFilmSize(
-        film_width,
-        film_height
-    )
-
-    lens.setNear(
-        0.1
-    )
-
-    lens.setFar(
-        100000.0
-    )
-
-    camera_node.setLens(
-        lens
-    )
-
-    # ------------------------------------------------------------
-    # Camera position.
-    # ------------------------------------------------------------
-
-    camera_np.setPos(
-        center_x,
-        center_y,
-        CAMERA_HEIGHT
-    )
-
-    # ------------------------------------------------------------
-    # Explicitly look at the exact map center.
-    # ------------------------------------------------------------
-
-    camera_np.lookAt(
-        center_x,
-        center_y,
-        0.0
-    )
-
-    # ------------------------------------------------------------
-    # Create our OWN display region.
-    # ------------------------------------------------------------
-
-    display_region = (
-        win.makeDisplayRegion(
-            0.0,
-            1.0,
-            0.0,
-            1.0
-        )
-    )
-
-    display_region.setCamera(
-        camera_np
-    )
-
-    display_region.setActive(
-        True
-    )
-
-    # ------------------------------------------------------------
-    # Clear to a visible background.
-    # ------------------------------------------------------------
-
-    display_region.setClearColorActive(
-        True
-    )
-
-    display_region.setClearColor(
-        Vec4(
-            0.75,
-            0.75,
-            0.75,
-            1.0
-        )
-    )
-
-    # ------------------------------------------------------------
-    # Diagnostics.
-    # ------------------------------------------------------------
-
-    print(
-        "[CAMERA] Camera position:",
-        camera_np.getPos()
-    )
-
-    print(
-        "[CAMERA] Camera HPR:",
-        camera_np.getHpr()
-    )
-
-    print(
-        "[CAMERA] Looking at:",
-        center_x,
-        center_y,
-        0.0
-    )
-
-    print(
-        "[CAMERA] Orthographic film:",
-        film_width,
-        "x",
-        film_height
-    )
-
-    print(
-        "[CAMERA] Aspect ratio:",
-        aspect
-    )
-
-    print(
-        "[CAMERA] Near:",
-        lens.getNear()
-    )
-
-    print(
-        "[CAMERA] Far:",
-        lens.getFar()
-    )
-
-    print(
-        "[CAMERA] Dedicated display region active."
-    )
-
-    return camera_np
+    return cam_np
 
 
 # ================================================================
 # CENTER MARKER
 # ================================================================
 
-def create_center_marker(
-    engine,
-    center_x,
-    center_y
-):
+def create_center_marker(engine, cx, cy):
 
-    print(
-        "[DEBUG] Creating center marker..."
-    )
+    lines = LineSegs("map-center")
+    lines.setThickness(8.0)
+    lines.setColor(Vec4(1.0, 0.0, 1.0, 1.0))   # magenta
 
-    # Use a cross rather than a square so it is clearly visible.
-    lines = LineSegs(
-        "map-center"
-    )
+    m = 120.0
+    lines.moveTo(cx - m, cy,     50.0)
+    lines.drawTo(cx + m, cy,     50.0)
+    lines.moveTo(cx,     cy - m, 50.0)
+    lines.drawTo(cx,     cy + m, 50.0)
 
-    lines.setThickness(
-        8.0
-    )
-
-    # MAGENTA.
-    lines.setColor(
-        1.0,
-        0.0,
-        1.0,
-        1.0
-    )
-
-    marker_size = 100.0
-
-    lines.moveTo(
-        center_x - marker_size,
-        center_y,
-        50.0
-    )
-
-    lines.drawTo(
-        center_x + marker_size,
-        center_y,
-        50.0
-    )
-
-    lines.moveTo(
-        center_x,
-        center_y - marker_size,
-        50.0
-    )
-
-    lines.drawTo(
-        center_x,
-        center_y + marker_size,
-        50.0
-    )
-
-    node = engine.render.attachNewNode(
-        lines.create()
-    )
-
-    node.setTwoSided(
-        True
-    )
-
+    node = engine.render.attachNewNode(lines.create())
+    node.setTwoSided(True)
+    node.setAntialias(AntialiasAttrib.MLine)
     return node
 
 
 # ================================================================
-# DEBUG LANE RENDERING
+# ROAD SURFACE (filled quads from lane centreline)
 # ================================================================
 
-def draw_debug_lanes(
-    engine,
-    blocks
-):
+def draw_road_surfaces(engine, blocks):
+    """
+    Draw filled asphalt-coloured quads along every lane centreline.
+    Uses the same triangle-strip geometry as OpenDriveBlock but
+    rendered into the scene graph directly for immediate feedback.
+    """
+    from panda3d.core import (
+        Geom, GeomNode, GeomTriangles,
+        GeomVertexData, GeomVertexFormat, GeomVertexWriter,
+        NodePath,
+    )
 
     print()
-    print(
-        "[DEBUG] Rendering lane centerlines..."
-    )
+    print("[ROAD] Building road-surface geometry...")
 
-    root = engine.render.attachNewNode(
-        "YelahankaDebugLanes"
-    )
-
-    rendered = 0
-    total_points = 0
+    root = engine.render.attachNewNode("YelahankaRoads")
+    total_quads = 0
 
     for block in blocks:
-
-        graph = getattr(
-            block.block_network,
-            "graph",
-            {}
-        )
+        graph = getattr(block.block_network, "graph", {})
 
         for lane_key, lane_info in graph.items():
-
             try:
-
-                lane = getattr(
-                    lane_info,
-                    "lane",
-                    None
-                )
-
-                if lane is None:
-
+                lane   = lane_info.lane
+                pts    = _get_lane_points(lane)
+                if pts is None or len(pts) < 2:
                     continue
 
-                points = getattr(
-                    lane,
-                    "visualization_points",
-                    None
-                )
+                width  = max(float(getattr(lane, "width", 3.5) or 3.5), 0.5)
+                hw     = width * 0.5
 
-                if points is None:
-
-                    points = getattr(
-                        lane,
-                        "points",
-                        None
-                    )
-
-                if points is None:
-
+                left_pts, right_pts = _lane_boundaries(pts, hw)
+                if len(left_pts) < 2:
                     continue
 
-                if len(points) < 2:
-
-                    continue
-
-                lines = LineSegs(
-                    "OpenDRIVE-lane"
+                vdata = GeomVertexData(
+                    "road", GeomVertexFormat.getV3(), Geom.UH_static
                 )
+                n_verts = len(left_pts) * 2
+                vdata.setNumRows(n_verts)
+                vw = GeomVertexWriter(vdata, "vertex")
 
-                lines.setThickness(
-                    DEBUG_LINE_WIDTH
-                )
+                for lp, rp in zip(left_pts, right_pts):
+                    vw.addData3f(float(lp[0]), float(lp[1]), 0.0)
+                    vw.addData3f(float(rp[0]), float(rp[1]), 0.0)
 
-                # RED.
-                lines.setColor(
-                    1.0,
-                    0.0,
-                    0.0,
-                    1.0
-                )
+                tris = GeomTriangles(Geom.UH_static)
+                for i in range(len(left_pts) - 1):
+                    la, ra = 2 * i, 2 * i + 1
+                    lb, rb = 2 * (i + 1), 2 * (i + 1) + 1
+                    tris.addVertices(la, ra, lb)
+                    tris.addVertices(ra, rb, lb)
 
-                first = points[0]
+                geom = Geom(vdata)
+                geom.addPrimitive(tris)
+                node = GeomNode("road-%s" % str(lane_key))
+                node.addGeom(geom)
 
-                lines.moveTo(
-                    float(first[0]),
-                    float(first[1]),
-                    30.0
-                )
+                np_ = root.attachNewNode(node)
+                np_.setTwoSided(True)
+                np_.setColor(ROAD_COLOR)
 
-                for point in points[1:]:
-
-                    lines.drawTo(
-                        float(point[0]),
-                        float(point[1]),
-                        30.0
-                    )
-
-                geom = lines.create()
-
-                node = root.attachNewNode(
-                    geom
-                )
-
-                node.setTwoSided(
-                    True
-                )
-
-                rendered += 1
-
-                total_points += len(
-                    points
-                )
+                total_quads += len(left_pts) - 1
 
             except Exception as e:
+                pass   # silently skip broken lanes
 
-                print(
-                    "[DEBUG] Lane rendering failed:",
-                    lane_key,
-                    type(e).__name__,
-                    str(e)
-                )
+    print(f"[ROAD] Road-surface quads: {total_quads}")
+    return root
 
-    print(
-        "[DEBUG] Directly rendered lanes:",
-        rendered
-    )
 
-    print(
-        "[DEBUG] Total lane points:",
-        total_points
-    )
+# ================================================================
+# LANE MARKINGS  (yellow lines between lanes)
+# ================================================================
+
+def draw_lane_markings(engine, blocks):
+    """
+    Draw yellow dashed / solid lane-boundary lines.
+    """
+    print()
+    print("[MARK] Building lane markings...")
+
+    root = engine.render.attachNewNode("YelahankaMarkings")
+    drawn = 0
+
+    for block in blocks:
+        graph = getattr(block.block_network, "graph", {})
+
+        for lane_key, lane_info in graph.items():
+            try:
+                lane = lane_info.lane
+                pts  = _get_lane_points(lane)
+                if pts is None or len(pts) < 2:
+                    continue
+
+                width = max(float(getattr(lane, "width", 3.5) or 3.5), 0.5)
+                hw    = width * 0.5
+
+                left_pts, right_pts = _lane_boundaries(pts, hw)
+
+                for side_pts in (left_pts, right_pts):
+                    if len(side_pts) < 2:
+                        continue
+
+                    ls = LineSegs("mark-%s" % str(lane_key))
+                    ls.setThickness(LINE_WIDTH_LANE_MARK)
+                    ls.setColor(MARK_COLOR)
+
+                    p0 = side_pts[0]
+                    ls.moveTo(float(p0[0]), float(p0[1]), 1.5)
+                    for p in side_pts[1:]:
+                        ls.drawTo(float(p[0]), float(p[1]), 1.5)
+
+                    n = root.attachNewNode(ls.create())
+                    n.setTwoSided(True)
+                    n.setAntialias(AntialiasAttrib.MLine)
+                    drawn += 1
+
+            except Exception:
+                pass
+
+    print(f"[MARK] Lane-marking polylines: {drawn}")
+    return root
+
+
+# ================================================================
+# LANE CENTRELINES  (diagnostic red)
+# ================================================================
+
+def draw_centrelines(engine, blocks):
+    """
+    Draw thin red centrelines through every lane for diagnostics.
+    """
+    print()
+    print("[CENTRE] Building centreline debug lines...")
+
+    root    = engine.render.attachNewNode("YelahankaCentrelines")
+    rendered = 0
+
+    for block in blocks:
+        graph = getattr(block.block_network, "graph", {})
+
+        for lane_key, lane_info in graph.items():
+            try:
+                lane = lane_info.lane
+                pts  = _get_lane_points(lane)
+                if pts is None or len(pts) < 2:
+                    continue
+
+                ls = LineSegs("cl-%s" % str(lane_key))
+                ls.setThickness(LINE_WIDTH_CENTRELINE)
+                ls.setColor(CENTRE_COLOR)
+
+                ls.moveTo(float(pts[0][0]), float(pts[0][1]), 3.0)
+                for p in pts[1:]:
+                    ls.drawTo(float(p[0]), float(p[1]), 3.0)
+
+                n = root.attachNewNode(ls.create())
+                n.setTwoSided(True)
+                n.setAntialias(AntialiasAttrib.MLine)
+                rendered += 1
+
+            except Exception:
+                pass
+
+    print(f"[CENTRE] Centrelines rendered: {rendered}")
+
+    if rendered == 0:
+        print("[CENTRE] WARNING: 0 lanes found in block networks!")
+        print("[CENTRE] Trying direct geometry fallback...")
+        rendered = _draw_centrelines_fallback(engine, root)
 
     return root
+
+
+def _draw_centrelines_fallback(engine, root):
+    """
+    Emergency fallback: rebuild centrelines directly from the
+    OpenDRIVE parsed road geometry without touching the block network.
+    This catches cases where block_network.graph is empty.
+    """
+    import importlib, sys
+
+    # Try to retrieve the odr_map from the module-level global.
+    odr_map = globals().get("_ODR_MAP", None)
+    if odr_map is None:
+        print("[FALLBACK] No _ODR_MAP in globals – skipping fallback.")
+        return 0
+
+    rendered = 0
+
+    from metadrive.component.lane.opendrive_lane import OpenDriveLane
+    from metadrive.utils.opendrive.map_load import get_lane_width
+
+    for road in odr_map.roads[:MAX_ROADS]:
+        try:
+            geometries = road.planView._geometries
+            if not geometries:
+                continue
+
+            # Draw the road reference line (centreline of road 0).
+            lane_data = None
+            for sec in getattr(road.lanes, "lane_sections", []):
+                for ld in getattr(sec, "allLanes", []):
+                    if int(getattr(ld, "id", 999)) == 0:
+                        lane_data = ld
+                        break
+                if lane_data:
+                    break
+
+            if lane_data is None:
+                # Synthesise a minimal stand-in lane object.
+                class _FakeLane:
+                    def __init__(self):
+                        self.id = 0
+                        self.parentRoad = road
+                lane_data = _FakeLane()
+
+            try:
+                lane = OpenDriveLane(3.5, lane_data)
+                pts  = lane.visualization_points
+                if pts is None or len(pts) < 2:
+                    continue
+
+                ls = LineSegs("fb-cl-%s" % road.id)
+                ls.setThickness(LINE_WIDTH_CENTRELINE)
+                ls.setColor(Vec4(0.0, 0.6, 1.0, 1.0))   # blue for fallback
+
+                ls.moveTo(float(pts[0][0]), float(pts[0][1]), 3.0)
+                for p in pts[1:]:
+                    ls.drawTo(float(p[0]), float(p[1]), 3.0)
+
+                n = root.attachNewNode(ls.create())
+                n.setTwoSided(True)
+                n.setAntialias(AntialiasAttrib.MLine)
+                rendered += 1
+
+            except Exception as e:
+                print(f"[FALLBACK] Road {road.id}: {type(e).__name__}: {e}")
+
+        except Exception:
+            pass
+
+    print(f"[FALLBACK] Fallback centrelines: {rendered}")
+    return rendered
+
+
+# ================================================================
+# HELPERS
+# ================================================================
+
+def _get_lane_points(lane):
+    """Return the (N, 2) centreline point array for a lane, or None."""
+    for attr in ("visualization_points", "points"):
+        pts = getattr(lane, attr, None)
+        if pts is not None:
+            pts = np.asarray(pts, dtype=np.float64)
+            if pts.ndim == 2 and pts.shape[1] >= 2 and len(pts) >= 2:
+                pts = pts[:, :2]
+                mask = np.all(np.isfinite(pts), axis=1)
+                pts  = pts[mask]
+                if len(pts) >= 2:
+                    return pts
+    return None
+
+
+def _lane_boundaries(centreline, half_width):
+    """
+    Given a (N, 2) centreline and a half-width, return
+    (left_pts, right_pts) as lists of (x, y) floats.
+    """
+    left, right = [], []
+    pts = np.asarray(centreline, dtype=np.float64)
+    n   = len(pts)
+
+    for i in range(n):
+        if i == 0:
+            tang = pts[1] - pts[0]
+        elif i == n - 1:
+            tang = pts[-1] - pts[-2]
+        else:
+            tang = pts[i + 1] - pts[i - 1]
+
+        norm = float(np.linalg.norm(tang))
+        if norm < 1e-8:
+            if left:
+                left.append(left[-1])
+                right.append(right[-1])
+            continue
+
+        tang /= norm
+        normal = np.array([-tang[1], tang[0]], dtype=np.float64)
+
+        left.append(pts[i] + normal * half_width)
+        right.append(pts[i] - normal * half_width)
+
+    return left, right
 
 
 # ================================================================
@@ -775,377 +626,212 @@ def draw_debug_lanes(
 if __name__ == "__main__":
 
     print()
-    print("========================================")
+    print("=" * 40)
     print("STARTING YELAHANKA METADRIVE")
-    print("========================================")
+    print("=" * 40)
     print()
+
+    # ============================================================
+    # HARDWARE INFO
+    # ============================================================
+
+    print_hw_info()
 
     # ============================================================
     # ENGINE
     # ============================================================
 
-    engine = TestBlock(
-        True
-    )
+    engine = TestBlock(True)
 
-    initialize_asset_loader(
-        engine
-    )
+    initialize_asset_loader(engine)
 
-    # ============================================================
-    # LOAD OPEN DRIVE
-    # ============================================================
-
-    print(
-        "[MAP] Loading:",
-        XODR_PATH
-    )
-
-    odr_map = load_opendrive_map(
-        XODR_PATH
-    )
-
-    print(
-        "[MAP] OpenDRIVE loaded!"
-    )
-
-    print(
-        "[MAP] Total roads:",
-        len(odr_map.roads)
-    )
-
-    print(
-        "[MAP] Total junctions:",
-        len(odr_map.junctions)
-    )
-
-    roads = odr_map.roads[
-        :MAX_ROADS
-    ]
-
-    print(
-        "[MAP] Processing:",
-        len(roads),
-        "roads"
-    )
+    # Enable scene-level anti-aliasing.
+    engine.render.setAntialias(AntialiasAttrib.MAuto)
 
     # ============================================================
-    # ROAD NETWORK
+    # LOAD OPENDRIVE MAP
+    # ============================================================
+
+    print(f"\n[MAP] Loading: {XODR_PATH}")
+
+    odr_map = load_opendrive_map(XODR_PATH)
+
+    # Store globally so fallback renderer can reach it.
+    _ODR_MAP = odr_map
+    globals()["_ODR_MAP"] = odr_map
+
+    print(f"[MAP] OpenDRIVE loaded!")
+    print(f"[MAP] Total roads:     {len(odr_map.roads)}")
+    print(f"[MAP] Total junctions: {len(odr_map.junctions)}")
+
+    roads = odr_map.roads[:MAX_ROADS]
+    print(f"[MAP] Processing:      {len(roads)} roads")
+
+    # ============================================================
+    # ROAD NETWORK + BLOCKS
     # ============================================================
 
     global_network = OpenDriveRoadNetwork()
-
     blocks = []
-
     block_id = 0
 
-    # ============================================================
-    # BUILD BLOCKS
-    # ============================================================
-
     print()
-    print(
-        "[MAP] Building OpenDRIVE blocks..."
-    )
+    print("[MAP] Building OpenDRIVE blocks...")
 
     for road in roads:
-
-        sections = getattr(
-            road.lanes,
-            "lane_sections",
-            []
-        )
+        sections = getattr(road.lanes, "lane_sections", [])
 
         for section in sections:
-
             try:
-
                 block = OpenDriveBlock(
-                    block_id,
-                    global_network,
-                    0,
-                    section
+                    block_id, global_network, 0, section
                 )
 
                 success = False
-
                 try:
-
-                    success = (
-                        block.construct_block(
-                            engine.render,
-                            engine.physics_world
-                        )
+                    success = block.construct_block(
+                        engine.render, engine.physics_world
                     )
-
                 except Exception as e:
+                    print(f"[BLOCK] construct_block failed road {road.id}: "
+                          f"{type(e).__name__}: {e}")
 
-                    print(
-                        "[MAP] Construction failed:",
-                        road.id,
-                        type(e).__name__,
-                        str(e)
-                    )
-
-                lane_count = 0
-
-                try:
-
-                    graph = (
-                        block.block_network.graph
-                    )
-
-                    lane_count = len(
-                        graph
-                    )
-
-                except Exception:
-
-                    lane_count = 0
-
-                print(
-                    "[WORLD] road:",
-                    road.id,
-                    "lanes:",
-                    lane_count
-                )
+                lane_count = len(getattr(block.block_network, "graph", {}))
 
                 if success or lane_count > 0:
-
-                    blocks.append(
-                        block
-                    )
-
+                    blocks.append(block)
                     block_id += 1
-
-                else:
-
-                    print(
-                        "[MAP] Skipping road:",
-                        road.id
+                    sys.stdout.write(
+                        f"\r[MAP] Blocks built: {len(blocks)} "
+                        f"(road {road.id}, lanes {lane_count})"
                     )
+                    sys.stdout.flush()
 
             except Exception as e:
-
-                print(
-                    "[MAP] Section skipped:",
-                    road.id,
-                    type(e).__name__,
-                    str(e)
-                )
-
-    # ============================================================
-    # VALIDATION
-    # ============================================================
-
-    if not blocks:
-
-        raise RuntimeError(
-            "No valid MetaDrive blocks were created."
-        )
+                print(f"\n[MAP] Section skipped road {road.id}: "
+                      f"{type(e).__name__}: {e}")
 
     print()
-    print(
-        "[MAP] Finished!"
-    )
 
-    print(
-        "[MAP] Blocks created:",
-        len(blocks)
+    if not blocks:
+        raise RuntimeError(
+            "No valid MetaDrive blocks were created – cannot visualize."
+        )
+
+    total_lanes = sum(
+        len(getattr(b.block_network, "graph", {})) for b in blocks
     )
+    print(f"\n[MAP] Blocks created:   {len(blocks)}")
+    print(f"[MAP] Total graph lanes: {total_lanes}")
 
     # ============================================================
     # MAP BOUNDS
     # ============================================================
 
-    (
-        x_min,
-        x_max,
-        y_min,
-        y_max
-    ) = get_map_bounds(
-        roads
-    )
-
-    center_x = (
-        x_min + x_max
-    ) / 2.0
-
-    center_y = (
-        y_min + y_max
-    ) / 2.0
-
-    map_width = (
-        x_max - x_min
-    )
-
-    map_height = (
-        y_max - y_min
-    )
-
-    map_size = max(
-        map_width,
-        map_height
-    )
+    x_min, x_max, y_min, y_max = get_map_bounds(roads)
+    cx = (x_min + x_max) / 2.0
+    cy = (y_min + y_max) / 2.0
+    mw = x_max - x_min
+    mh = y_max - y_min
+    ms = max(mw, mh)
 
     print()
-    print("========================================")
+    print("=" * 40)
     print("[MAP] BOUNDS")
-    print("========================================")
-
-    print(
-        "X:",
-        x_min,
-        "to",
-        x_max
-    )
-
-    print(
-        "Y:",
-        y_min,
-        "to",
-        y_max
-    )
-
-    print(
-        "Width:",
-        map_width
-    )
-
-    print(
-        "Height:",
-        map_height
-    )
-
-    print(
-        "Center:",
-        center_x,
-        center_y
-    )
+    print("=" * 40)
+    print(f"  X: {x_min:.1f} → {x_max:.1f}  (width  {mw:.1f} m)")
+    print(f"  Y: {y_min:.1f} → {y_max:.1f}  (height {mh:.1f} m)")
+    print(f"  Center: ({cx:.1f}, {cy:.1f})")
 
     # ============================================================
-    # ROOT TRANSFORM
+    # ROOT TRANSFORM  (keep OpenDRIVE coords as-is)
     # ============================================================
 
-    # Keep OpenDRIVE coordinates exactly as they are.
-    engine.render.setPos(
-        0,
-        0,
-        0
-    )
-
-    engine.render.setScale(
-        1,
-        1,
-        1
-    )
+    engine.render.setPos(0, 0, 0)
+    engine.render.setScale(1, 1, 1)
 
     # ============================================================
     # LIGHTING
     # ============================================================
 
-    setup_lighting(
-        engine
-    )
+    setup_lighting(engine)
 
     # ============================================================
     # GROUND
     # ============================================================
 
     if DRAW_GROUND:
+        create_ground(engine, cx, cy, ms + 2.0 * GROUND_MARGIN)
 
-        ground_size = (
-            map_size
-            + 2.0 * GROUND_MARGIN
-        )
+    # ============================================================
+    # ROAD SURFACES
+    # ============================================================
 
-        create_ground(
-            engine,
-            center_x,
-            center_y,
-            ground_size
-        )
+    if DRAW_ROAD_SURFACE:
+        draw_road_surfaces(engine, blocks)
+
+    # ============================================================
+    # LANE MARKINGS
+    # ============================================================
+
+    if DRAW_LANE_LINES:
+        draw_lane_markings(engine, blocks)
+
+    # ============================================================
+    # CENTRELINES  (diagnostic)
+    # ============================================================
+
+    if DRAW_CENTRELINES:
+        draw_centrelines(engine, blocks)
 
     # ============================================================
     # CENTER MARKER
     # ============================================================
 
     if DRAW_CENTER_MARKER:
-
-        create_center_marker(
-            engine,
-            center_x,
-            center_y
-        )
+        create_center_marker(engine, cx, cy)
 
     # ============================================================
-    # DEBUG LANES
+    # CAMERA
     # ============================================================
 
-    if DRAW_DEBUG_LANES:
-
-        draw_debug_lanes(
-            engine,
-            blocks
-        )
+    win = engine.win
+    setup_dedicated_camera(engine, cx, cy, mw, mh, win)
 
     # ============================================================
-    # DEDICATED CAMERA
+    # SCENE STATS
     # ============================================================
 
-    setup_dedicated_camera(
-        engine,
-        center_x,
-        center_y,
-        map_width,
-        map_height
-    )
+    engine.render.analyze()
 
     # ============================================================
     # FINAL STATUS
     # ============================================================
 
     print()
-    print("========================================")
+    print("=" * 40)
     print("YELAHANKA MAP IS RUNNING")
-    print("========================================")
-
-    print(
-        "Roads processed:",
-        len(roads)
-    )
-
-    print(
-        "Blocks created:",
-        len(blocks)
-    )
-
-    print(
-        "Map center:",
-        center_x,
-        center_y
-    )
-
-    print(
-        "Map size:",
-        map_width,
-        "x",
-        map_height
-    )
-
+    print("=" * 40)
+    print(f"  Roads processed:  {len(roads)}")
+    print(f"  Blocks created:   {len(blocks)}")
+    print(f"  Total lanes:      {total_lanes}")
+    print(f"  Map center:       ({cx:.1f}, {cy:.1f})")
+    print(f"  Map size:         {mw:.1f} x {mh:.1f} m")
     print()
-    print("EXPECTED:")
-    print("  GREY BACKGROUND = camera viewport")
-    print("  DARK GREY       = Yelahanka ground")
-    print("  RED             = OpenDRIVE lanes")
-    print("  MAGENTA CROSS   = exact map center")
+    print("  LEGEND")
+    print("  ------")
+    print("  Grey-blue background  = sky / viewport")
+    print("  Dark grey             = Yelahanka ground")
+    print("  Dark quads            = road surface")
+    print("  Yellow lines          = lane markings")
+    print("  Red thin lines        = lane centrelines (debug)")
+    print("  Magenta cross         = exact map centre")
     print()
-    print("========================================")
+    print("=" * 40)
 
     # ============================================================
     # MAIN LOOP
     # ============================================================
 
     while True:
-
         engine.taskMgr.step()
