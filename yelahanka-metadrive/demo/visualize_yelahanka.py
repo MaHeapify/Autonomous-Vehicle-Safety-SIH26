@@ -46,11 +46,21 @@ os.environ.setdefault("vblank_mode", "0")
 import math
 import sys
 import io
+import os
 import numpy as np
 
 # Force UTF-8 on Windows console so Unicode prints don't crash.
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+# Ensure metadrive source and project roots are in sys.path
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+_WORKSPACE_ROOT = os.path.dirname(_REPO_ROOT)
+for _p in [_WORKSPACE_ROOT, os.path.join(_WORKSPACE_ROOT, "metadrive"), r"D:\downloads\SIH-MTECK -2026\metadrive_source"]:
+    if os.path.exists(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
+
 
 from panda3d.core import (
     AmbientLight,
