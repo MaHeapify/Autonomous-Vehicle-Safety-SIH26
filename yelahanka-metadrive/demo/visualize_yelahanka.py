@@ -721,6 +721,9 @@ if __name__ == "__main__":
                         f"(road {road.id}, lanes {lane_count})"
                     )
                     sys.stdout.flush()
+                    # Pump event loop every 10 blocks to keep window responsive.
+                    if len(blocks) % 10 == 0:
+                        engine.taskMgr.step()
 
             except Exception as e:
                 print(f"\n[MAP] Section skipped road {road.id}: "
